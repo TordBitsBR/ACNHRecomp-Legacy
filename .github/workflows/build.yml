@@ -1,0 +1,83 @@
+# The release packages (README "Downloads"): the launcher, which prepares the game folder from the player's extracted
+# ExeFS and RomFS, the player, which plays it, the libraries they need, and the preparation's tools (tools/zig, from
+# ziglang.org checked against its SHA-256, and tools/shaders, the shader tool built here with .NET NativeAOT) with
+# acnh_prepare; nothing of the game. One per system, each built on the oldest one it should run on (about 100 MB
+# each, far under GitHub's 2 GB per release file). Run from the Actions tab (Build > Run workflow); each package is an
+# artifact of the run.
+name: Build Legacy Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version in the package names (empty: the commit's short hash)"
+        required: false
+        default: "0.11.0-legacy"
+
+permissions:
+  contents: read
+
+env:
+  SDL3: "3.4.16"          # as tools/setup_acnh.py
+  VK_HEADERS: "1.4.357"   # as tools/setup_acnh.py
+  DOTNET: "10.0.x"        # the shader tool (tools/build_shader_tool.py: tools/maxwell/spirv_harness, NativeAOT)
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        env:
+          INPUT: ${{ inputs.version }}
+        run: |
+          v=${INPUT:-${GITHUB_SHA::7}}
+          [[ $v =~ ^[A-Za-z0-9._-]+$ ]] || { echo "version: letters, digits and . _ - only"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Windows x64
+    needs: version
+    runs-on: windows-2022
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      NX_RELEASE_VERSION: ${{ needs.version.outputs.version }}  # the version the programs show (#76)
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # the launcher's version (git describe)
+      - uses: ilammy/msvc-dev-cmd@v1  # vcvars64: clang-cl links against the Windows SDK and the C runtime
+        with:
+          arch: x64
+      - name: SDL3, Vulkan headers
+        run: |
+          T=$(cygpath -u "$RUNNER_TEMP")
+          curl -fsSL -o "$T/sdl.zip" "https://github.com/libsdl-org/SDL/releases/download/release-$SDL3/SDL3-devel-$SDL3-VC.zip"
+          7z x -bso0 -o"$RUNNER_TEMP" "$RUNNER_TEMP/sdl.zip"
+          curl -fsSL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$VK_HEADERS.tar.gz" | tar -xz -C "$T"
+      - name: libvpx, libvorbis (vcpkg)
+        run: |
+          "$(cygpath -u "$VCPKG_INSTALLATION_ROOT")/vcpkg.exe" install libvpx:x64-windows-static-md-release \
+              libvorbis:x64-windows-static-md-release zlib:x64-windows-static-md-release --disable-metrics
+      - uses: actions/setup-dotnet@v5  # the shader tool; NativeAOT links with the Visual Studio C++ tools above
+        with:
+          dotnet-version: ${{ env.DOTNET }}
+      - name: Package
+        run: |
+          export PATH="/c/Program Files/LLVM/bin:$PATH"
+          T=$(cygpath -m "$RUNNER_TEMP")
+          tools/package_release_win.sh "$VERSION" "$T/SDL3-$SDL3" \
+              "$(cygpath -m "$VCPKG_INSTALLATION_ROOT")/installed/x64-windows-static-md-release" \
+              "$T/Vulkan-Headers-$VK_HEADERS/include"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: private/release/ACNHRecomp-${{ env.VERSION }}-windows-x64.zip
+          archive: false
+          if-no-files-found: error
+
